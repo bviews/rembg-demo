@@ -8,8 +8,8 @@ from rembg import new_session, remove
 
 def remove_background(image_path, model_name='birefnet-general'):
     """
-    使用 rembg 库的最新算法去除图片背景
-    
+    使用 rmbg 库的最新算法去除图片背景
+
     Args:
         image_path (str): 输入图片路径
         model_name (str): 使用的模型名称，可选：
@@ -17,30 +17,38 @@ def remove_background(image_path, model_name='birefnet-general'):
                           - 'birefnet-portrait': 人像专用
                           - 'u2net': 经典模型
                           - 'isnet-general-use': 通用场景
-    
+
     Returns:
-        PIL.Image: 去除背景后的图片（带透明度）
+        tuple: (去除背景后的图片, mask图片)
     """
     try:
         print(f"正在使用 {model_name} 模型去除背景...")
-        
+
         # 创建会话以提高性能
         session = new_session(model_name)
-        
+
         # 读取输入图片
         with open(image_path, 'rb') as input_file:
             input_data = input_file.read()
-        
+
         # 去除背景
         output_data = remove(input_data, session=session)
-        
+
         # 转换为 PIL 图片
         from io import BytesIO
         output_image = Image.open(BytesIO(output_data)).convert("RGBA")
-        
+
+        # 提取 alpha 通道作为 mask
+        mask = output_image.split()[-1]  # 获取 alpha 通道
+
+        # 创建黑白mask图片（白色=前景，黑色=背景）
+        mask_image = Image.new("L", output_image.size, 0)  # 创建黑色背景
+        mask_image.paste(mask, (0, 0))  # 粘贴alpha通道作为白色前景
+
         print(f"背景去除完成！图片尺寸: {output_image.size}")
-        return output_image
-        
+        print(f"Mask图片生成完成！")
+        return output_image, mask_image
+
     except Exception as e:
         print(f"背景去除失败: {str(e)}")
         raise
@@ -143,43 +151,49 @@ def split_foregrounds(no_bg_image, output_dir, min_area=500):
 def process_image_with_rmbg(image_path, output_dir, model_name='birefnet-general', min_area=500):
     """
     完整的图像处理流程：背景去除 + 产品分割
-    
+
     Args:
         image_path (str): 输入图片路径
         output_dir (str): 输出目录
         model_name (str): 背景去除模型名称
         min_area (int): 最小面积阈值
-    
+
     Returns:
-        tuple: (去背景图片保存路径, 分割产品数量)
+        tuple: (去背景图片保存路径, mask图片保存路径, 分割产品数量)
     """
     print(f"开始处理图片: {image_path}")
     print(f"使用模型: {model_name}")
     print(f"输出目录: {output_dir}")
     print("=" * 50)
-    
+
     try:
         # 确保输出目录存在
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # 步骤1: 去除背景
-        no_bg_image = remove_background(image_path, model_name)
-        
+        no_bg_image, mask_image = remove_background(image_path, model_name)
+
         # 保存去背景的完整图片
         no_bg_path = os.path.join(output_dir, "no_background.png")
         no_bg_image.save(no_bg_path)
         print(f"去背景图片已保存: {no_bg_path}")
-        
+
+        # 保存mask图片
+        mask_path = os.path.join(output_dir, "mask.png")
+        mask_image.save(mask_path)
+        print(f"Mask图片已保存: {mask_path}")
+
         # 步骤2: 分割产品包装
         product_count = split_foregrounds(no_bg_image, output_dir, min_area)
-        
+
         print("=" * 50)
         print("处理完成！")
         print(f"去背景图片: {no_bg_path}")
+        print(f"Mask图片: {mask_path}")
         print(f"分割产品数量: {product_count}")
-        
-        return no_bg_path, product_count
-        
+
+        return no_bg_path, mask_path, product_count
+
     except Exception as e:
         print(f"处理失败: {str(e)}")
         raise
@@ -189,41 +203,39 @@ if __name__ == "__main__":
     # 配置参数
     input_image = "demo.jpg"
     output_directory = "output_crops"
-    
+
     # 可选的模型列表（按推荐顺序）:
     # - 'birefnet-general': 最新通用模型，适合各种场景
     # - 'birefnet-portrait': 人像专用，适合有人物的图片
     # - 'u2net': 经典稳定模型
     # - 'isnet-general-use': 通用场景模型
     model = 'birefnet-general'
-    
+
     # 最小面积阈值（像素），用于过滤小噪点
     min_area_threshold = 500
-    
+
     print("🚀 产品包装分割工具")
     print("使用最新的 AI 背景去除算法 + 智能产品分割")
     print("=" * 60)
-    
+
     # 检查输入文件是否存在
     if not os.path.exists(input_image):
         print(f"❌ 错误: 输入文件不存在: {input_image}")
         print("请确保 demo.jpg 文件在当前目录中")
         exit(1)
-    
+
     try:
         # 执行处理
-        result_path, product_count = process_image_with_rmbg(
-            input_image, 
-            output_directory, 
-            model, 
-            min_area_threshold
+        result_path, mask_path, product_count = process_image_with_rmbg(
+            input_image, output_directory, model, min_area_threshold
         )
-        
+
         print(f"\n✅ 处理成功完成!")
         print(f"📁 输出目录: {output_directory}")
         print(f"🖼️  去背景图片: {result_path}")
+        print(f"🎭 Mask图片: {mask_path}")
         print(f"📦 分割产品数量: {product_count}")
-        
+
         if product_count > 0:
             print(f"\n💡 提示: 产品文件保存为 product_0.png, product_1.png, ...")
         else:
@@ -231,7 +243,7 @@ if __name__ == "__main__":
             print(f"   - 降低最小面积阈值 (当前: {min_area_threshold})")
             print(f"   - 检查输入图片是否包含清晰的产品")
             print(f"   - 尝试不同的背景去除模型")
-        
+
     except Exception as e:
         print(f"\n❌ 处理失败: {str(e)}")
         print("\n🔧 可能的解决方案:")

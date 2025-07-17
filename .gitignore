@@ -1,0 +1,31 @@
+venv
+.python-version
+*.pyc
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+.vscode/
+.idea/
+.env
+
+__pycache__
+
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+
+# local development files
+.local/
+
+# Claude Code configuration and cache files
+.claude/
+.claude_cache/
+.claude_data/
+claude_*.json
+claude_*.log
+.anthropic/
+CLAUDE.local.md

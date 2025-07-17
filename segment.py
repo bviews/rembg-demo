@@ -2,52 +2,86 @@ import os
 
 import cv2
 import numpy as np
+import torch
 from PIL import Image
-from rembg import new_session, remove
+from torchvision import transforms
+from transformers import AutoModelForImageSegmentation
 
 
-def remove_background(image_path, model_name='birefnet-general'):
+def remove_background(image_path):
     """
-    使用 rmbg 库的最新算法去除图片背景
+    使用 RMBG-2.0 算法去除图片背景
 
     Args:
         image_path (str): 输入图片路径
-        model_name (str): 使用的模型名称，可选：
-                          - 'birefnet-general': 通用场景，最新最佳模型
-                          - 'birefnet-portrait': 人像专用
-                          - 'u2net': 经典模型
-                          - 'isnet-general-use': 通用场景
 
     Returns:
         tuple: (去除背景后的图片, mask图片)
     """
     try:
-        print(f"正在使用 {model_name} 模型去除背景...")
+        print("正在使用 RMBG-2.0 模型去除背景...")
 
-        # 创建会话以提高性能
-        session = new_session(model_name)
+        # 从环境变量读取 Hugging Face token
+        access_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
 
-        # 读取输入图片
-        with open(image_path, 'rb') as input_file:
-            input_data = input_file.read()
+        # 读取原始图片
+        image = Image.open(image_path).convert("RGB")
+        original_size = image.size
+        print(f"原图尺寸: {original_size}")
 
-        # 去除背景
-        output_data = remove(input_data, session=session)
+        # 加载模型
+        print("正在加载 RMBG-2.0 模型...")
+        if access_token:
+            print("已检测到 Hugging Face token，正在进行身份验证...")
+            model = AutoModelForImageSegmentation.from_pretrained(
+                "briaai/RMBG-2.0", trust_remote_code=True, token=access_token
+            )
+        else:
+            print("未检测到 HUGGINGFACE_HUB_TOKEN 环境变量，尝试无认证访问...")
+            model = AutoModelForImageSegmentation.from_pretrained(
+                "briaai/RMBG-2.0", trust_remote_code=True
+            )
 
-        # 转换为 PIL 图片
-        from io import BytesIO
-        output_image = Image.open(BytesIO(output_data)).convert("RGBA")
+        # 设置计算精度和设备
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"使用设备: {device}")
 
-        # 提取 alpha 通道作为 mask
-        mask = output_image.split()[-1]  # 获取 alpha 通道
+        if device == "cuda":
+            torch.set_float32_matmul_precision("high")
 
-        # 创建黑白mask图片（白色=前景，黑色=背景）
-        mask_image = Image.new("L", output_image.size, 0)  # 创建黑色背景
-        mask_image.paste(mask, (0, 0))  # 粘贴alpha通道作为白色前景
+        model.to(device)
+        model.eval()
 
-        print(f"背景去除完成！图片尺寸: {output_image.size}")
+        # 图像预处理
+        image_size = (1024, 1024)
+        transform_image = transforms.Compose(
+            [
+                transforms.Resize(image_size),
+                transforms.ToTensor(),
+                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+            ]
+        )
+
+        input_images = transform_image(image).unsqueeze(0).to(device)
+
+        print("正在进行背景去除推理...")
+        # 执行推理
+        with torch.no_grad():
+            preds = model(input_images)[-1].sigmoid().cpu()
+
+        # 处理预测结果
+        pred = preds[0].squeeze()
+        pred_pil = transforms.ToPILImage()(pred)
+        mask = pred_pil.resize(original_size)
+
+        # 创建去背景图片
+        no_bg_image = image.copy()
+        no_bg_image.putalpha(mask)
+
+        print(f"背景去除完成！图片尺寸: {no_bg_image.size}")
         print(f"Mask图片生成完成！")
-        return output_image, mask_image
+
+        return no_bg_image, mask
 
     except Exception as e:
         print(f"背景去除失败: {str(e)}")
@@ -67,7 +101,7 @@ def split_foregrounds(no_bg_image, output_dir, min_area=500):
         int: 分割出的产品数量
     """
     print("开始分割产品包装...")
-    
+
     # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
 
@@ -87,17 +121,17 @@ def split_foregrounds(no_bg_image, output_dir, min_area=500):
 
     # 查找轮廓
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
+
     print(f"检测到 {len(contours)} 个轮廓")
 
     count = 0
     saved_objects = []
-    
+
     for i, cnt in enumerate(contours):
         # 计算轮廓面积和边界框
         area = cv2.contourArea(cnt)
         x, y, w, h = cv2.boundingRect(cnt)
-        
+
         # 过滤太小的区域
         if area < min_area:
             print(f"跳过轮廓 {i}: 面积太小 ({area} < {min_area})")
@@ -106,63 +140,62 @@ def split_foregrounds(no_bg_image, output_dir, min_area=500):
         # 创建更精确的掩码
         mask = np.zeros(alpha.shape, dtype=np.uint8)
         cv2.fillPoly(mask, [cnt], 255)
-        
+
         # 在边界框基础上稍微扩展，确保完整包含对象
         padding = 10
         x1 = max(0, x - padding)
         y1 = max(0, y - padding)
         x2 = min(rgba.shape[1], x + w + padding)
         y2 = min(rgba.shape[0], y + h + padding)
-        
+
         # 裁剪 RGBA 图像和掩码
         crop_rgba = rgba[y1:y2, x1:x2]
         crop_mask = mask[y1:y2, x1:x2]
-        
+
         # 应用掩码，只保留轮廓内的像素
         crop_rgba[:, :, 3] = np.minimum(crop_rgba[:, :, 3], crop_mask)
-        
+
         # 转换为 PIL 图像并保存
         crop_img = Image.fromarray(crop_rgba)
         filename = f"product_{count}.png"
         filepath = os.path.join(output_dir, filename)
         crop_img.save(filepath)
-        
+
         saved_objects.append({
             'filename': filename,
             'area': area,
             'bbox': (x, y, w, h),
             'size': crop_img.size
         })
-        
+
         print(f"保存产品 {count}: {filename}, 面积: {area:.0f}, 尺寸: {crop_img.size}")
         count += 1
 
     print(f"\n分割完成！共保存 {count} 个产品包装到目录: {output_dir}")
-    
+
     # 打印详细统计信息
     if saved_objects:
         print("\n产品统计信息:")
         for i, obj in enumerate(saved_objects):
             print(f"  产品 {i}: {obj['filename']} - 面积: {obj['area']:.0f}, 尺寸: {obj['size']}")
-    
+
     return count
 
 
-def process_image_with_rmbg(image_path, output_dir, model_name='birefnet-general', min_area=500):
+def process_image_with_rmbg(image_path, output_dir, min_area=500):
     """
-    完整的图像处理流程：背景去除 + 产品分割
+    完整的图像处理流程：RMBG-2.0 背景去除 + 产品分割
 
     Args:
         image_path (str): 输入图片路径
         output_dir (str): 输出目录
-        model_name (str): 背景去除模型名称
         min_area (int): 最小面积阈值
 
     Returns:
         tuple: (去背景图片保存路径, mask图片保存路径, 分割产品数量)
     """
     print(f"开始处理图片: {image_path}")
-    print(f"使用模型: {model_name}")
+    print(f"使用模型: RMBG-2.0")
     print(f"输出目录: {output_dir}")
     print("=" * 50)
 
@@ -171,7 +204,7 @@ def process_image_with_rmbg(image_path, output_dir, model_name='birefnet-general
         os.makedirs(output_dir, exist_ok=True)
 
         # 步骤1: 去除背景
-        no_bg_image, mask_image = remove_background(image_path, model_name)
+        no_bg_image, mask_image = remove_background(image_path)
 
         # 保存去背景的完整图片
         no_bg_path = os.path.join(output_dir, "no_background.png")
@@ -204,17 +237,19 @@ if __name__ == "__main__":
     input_image = "demo.jpg"
     output_directory = "output_crops"
 
-    # 可选的模型列表（按推荐顺序）:
-    # - 'birefnet-general': 最新通用模型，适合各种场景
-    # - 'birefnet-portrait': 人像专用，适合有人物的图片
-    # - 'u2net': 经典稳定模型
-    # - 'isnet-general-use': 通用场景模型
-    model = 'birefnet-general'
+    # 检查环境变量中的 Hugging Face token
+    token = os.getenv("HUGGINGFACE_HUB_TOKEN")
+    if not token:
+        print("⚠️  注意: RMBG-2.0 模型需要 Hugging Face access token")
+        print("请设置环境变量: export HUGGINGFACE_HUB_TOKEN='hf_xxxxxxxx'")
+        print("继续尝试无认证访问...")
+    else:
+        print(f"✅ 已检测到 Hugging Face token (前缀: {token[:8]}...)")
 
     # 最小面积阈值（像素），用于过滤小噪点
     min_area_threshold = 500
 
-    print("🚀 产品包装分割工具")
+    print("🚀 产品包装分割工具 - RMBG-2.0")
     print("使用最新的 AI 背景去除算法 + 智能产品分割")
     print("=" * 60)
 
@@ -227,7 +262,7 @@ if __name__ == "__main__":
     try:
         # 执行处理
         result_path, mask_path, product_count = process_image_with_rmbg(
-            input_image, output_directory, model, min_area_threshold
+            input_image, output_directory, min_area_threshold
         )
 
         print(f"\n✅ 处理成功完成!")
@@ -251,3 +286,10 @@ if __name__ == "__main__":
         print("   2. 确保有足够的磁盘空间")
         print("   3. 检查输入图片格式是否支持")
         print("   4. 尝试重新安装依赖: pip install -r requirements.txt")
+        if any(
+            error_code in str(e)
+            for error_code in ["401", "403", "Unauthorized", "gated repo"]
+        ):
+            print("   5. 🔑 权限错误: 请设置正确的 Hugging Face token:")
+            print("      export HUGGINGFACE_HUB_TOKEN='hf_xxxxxxxx'")
+            print("      访问 https://huggingface.co/briaai/RMBG-2.0 申请模型权限")

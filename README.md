@@ -48,6 +48,16 @@ echo "HUGGINGFACE_HUB_TOKEN=hf_xxxxxxxx" > .env
 
 ## 📖 使用方法
 
+### API 服务启动
+
+```bash
+# 配置 token 后启动 API 服务
+export HUGGINGFACE_HUB_TOKEN="hf_xxxxxxxx"
+python main.py
+```
+
+API 服务将在 `http://localhost:8000` 启动
+
 ### 基本使用
 ```bash
 # 配置 token 后运行
@@ -65,6 +75,112 @@ result_path, mask_path, product_count = process_image_with_rmbg(
     output_dir="output_crops",
     min_area=500
 )
+```
+
+## 🔌 API 接口文档
+
+### 基础信息
+- **Base URL**: `http://localhost:8000`
+- **API Version**: v1
+- **Content-Type**: `multipart/form-data`
+
+### 端点
+
+#### 1. 健康检查
+```http
+GET /
+```
+
+**响应示例：**
+```json
+{
+  "message": "PDS RMBG API is running"
+}
+```
+
+#### 2. 背景去除与产品分割
+```http
+POST /v1/rmbg
+```
+
+**请求参数：**
+- `image` (file): 图片文件，支持 JPG/PNG 格式
+
+**响应格式：**
+```json
+{
+  "status": 0,
+  "msg": "",
+  "data": {
+    "package_images": [
+      {
+        "index": 1,
+        "mask_b64": "base64编码的mask图片",
+        "image_b64": "base64编码的产品图片"
+      }
+    ]
+  }
+}
+```
+
+**状态码说明：**
+- `status: 0` - 成功
+- `status: 1` - 失败，错误信息在 `msg` 字段中
+
+**cURL 示例：**
+```bash
+curl -X POST "http://localhost:8000/v1/rmbg" \
+  -H "Content-Type: multipart/form-data" \
+  -F "image=@demo.jpg"
+```
+
+**Python 示例：**
+```python
+import requests
+import base64
+from PIL import Image
+import io
+
+# 上传图片
+with open("demo.jpg", "rb") as f:
+    files = {"image": f}
+    response = requests.post("http://localhost:8000/v1/rmbg", files=files)
+
+# 处理响应
+result = response.json()
+if result["status"] == 0:
+    for pkg in result["data"]["package_images"]:
+        # 解码图片
+        image_data = base64.b64decode(pkg["image_b64"])
+        mask_data = base64.b64decode(pkg["mask_b64"])
+        
+        # 保存图片
+        with open(f"product_{pkg['index']}.png", "wb") as f:
+            f.write(image_data)
+        with open(f"mask_{pkg['index']}.png", "wb") as f:
+            f.write(mask_data)
+```
+
+**JavaScript 示例：**
+```javascript
+const formData = new FormData();
+formData.append('image', fileInput.files[0]);
+
+fetch('http://localhost:8000/v1/rmbg', {
+  method: 'POST',
+  body: formData
+})
+.then(response => response.json())
+.then(data => {
+  if (data.status === 0) {
+    data.data.package_images.forEach(pkg => {
+      // 创建图片元素
+      const img = document.createElement('img');
+      img.src = `data:image/png;base64,${pkg.image_b64}`;
+      document.body.appendChild(img);
+    });
+  }
+});
 ```
 
 ## 📁 输出文件

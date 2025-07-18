@@ -23,17 +23,17 @@ def initialize_model():
     初始化RMBG-2.0模型，在程序启动时调用
     """
     global _model, _device, _transform
-    
+
     if _model is not None:
         logger.info("模型已经初始化，跳过重复加载")
         return
-    
+
     try:
         logger.info("正在初始化 RMBG-2.0 模型...")
-        
+
         # 从设置中读取 Hugging Face token
         access_token = settings.huggingface_hub_token
-        
+
         # 加载模型
         if access_token:
             logger.info("已检测到 Hugging Face token，正在进行身份验证...")
@@ -45,17 +45,17 @@ def initialize_model():
             _model = AutoModelForImageSegmentation.from_pretrained(
                 settings.MODEL_NAME, trust_remote_code=True
             )
-        
+
         # 设置计算精度和设备
         _device = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"使用设备: {_device}")
-        
+
         if _device == "cuda":
             torch.set_float32_matmul_precision("high")
-        
+
         _model.to(_device)
         _model.eval()
-        
+
         # 预定义图像预处理变换
         image_size = (settings.image_size, settings.image_size)
         _transform = transforms.Compose([
@@ -63,35 +63,35 @@ def initialize_model():
             transforms.ToTensor(),
             transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
         ])
-        
+
         logger.info("RMBG-2.0 模型初始化完成！")
-        
+
     except Exception as e:
         logger.error(f"模型初始化失败: {str(e)}")
         raise
 
 
-def remove_background(image_path):
+def remove_background(image_input):
     """
     使用 RMBG-2.0 算法去除图片背景
 
     Args:
-        image_path (str): 输入图片路径
+        image_input (str or file-like): 输入图片路径或文件对象
 
     Returns:
         tuple: (去除背景后的图片, mask图片)
     """
     global _model, _device, _transform
-    
+
     # 确保模型已初始化
     if _model is None:
         raise RuntimeError("模型未初始化，请先调用 initialize_model()")
-    
+
     try:
         logger.info("正在使用 RMBG-2.0 模型去除背景...")
 
-        # 读取原始图片
-        image = Image.open(image_path).convert("RGB")
+        # 读取原始图片 - 支持文件路径和文件对象
+        image = Image.open(image_input).convert("RGB")
         original_size = image.size
         logger.info(f"原图尺寸: {original_size}")
 

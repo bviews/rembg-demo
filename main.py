@@ -78,59 +78,48 @@ def process_uploaded_image(image_file: UploadFile) -> BaseApiOut:
                 data={"package_images": []}
             )
         
-        # Read image data
-        image_data = image_file.file.read()
+        # Reset file pointer to beginning
+        image_file.file.seek(0)
         
-        # Create temporary file
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp_file:
-            temp_file.write(image_data)
-            temp_file_path = temp_file.name
+        # Step 1: Remove background - directly use file object
+        no_bg_image, _ = remove_background(image_file.file)
         
-        try:
-            # Step 1: Remove background
-            no_bg_image, _ = remove_background(temp_file_path)
+        # Step 2: Split foregrounds using temporary directory
+        with tempfile.TemporaryDirectory() as temp_dir:
+            product_count = split_foregrounds(no_bg_image, temp_dir, min_area=settings.min_area_threshold)
             
-            # Step 2: Split foregrounds using temporary directory
-            with tempfile.TemporaryDirectory() as temp_dir:
-                product_count = split_foregrounds(no_bg_image, temp_dir, min_area=settings.min_area_threshold)
-                
-                package_images = []
-                
-                # Process each detected product
-                for i in range(product_count):
-                    product_path = os.path.join(temp_dir, f"product_{i}.png")
-                    if os.path.exists(product_path):
-                        # Load product image
-                        product_image = Image.open(product_path)
-                        
-                        # Create mask for this specific product
-                        # Extract alpha channel as mask
-                        if product_image.mode == "RGBA":
-                            mask_for_product = product_image.split()[-1]  # Get alpha channel
-                        else:
-                            # Create a simple mask if no alpha channel
-                            mask_for_product = Image.new("L", product_image.size, 255)
-                        
-                        # Convert to base64
-                        product_b64 = image_to_base64(product_image)
-                        mask_b64 = image_to_base64(mask_for_product)
-                        
-                        package_images.append(PackageImage(
-                            index=i + 1,
-                            mask_b64=mask_b64,
-                            image_b64=product_b64
-                        ))
-                
-                return BaseApiOut(
-                    status=0,
-                    msg="",
-                    data={"package_images": [img.model_dump() for img in package_images]}
-                )
-                
-        finally:
-            # Clean up temporary file
-            if os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
+            package_images = []
+            
+            # Process each detected product
+            for i in range(product_count):
+                product_path = os.path.join(temp_dir, f"product_{i}.png")
+                if os.path.exists(product_path):
+                    # Load product image
+                    product_image = Image.open(product_path)
+                    
+                    # Create mask for this specific product
+                    # Extract alpha channel as mask
+                    if product_image.mode == "RGBA":
+                        mask_for_product = product_image.split()[-1]  # Get alpha channel
+                    else:
+                        # Create a simple mask if no alpha channel
+                        mask_for_product = Image.new("L", product_image.size, 255)
+                    
+                    # Convert to base64
+                    product_b64 = image_to_base64(product_image)
+                    mask_b64 = image_to_base64(mask_for_product)
+                    
+                    package_images.append(PackageImage(
+                        index=i + 1,
+                        mask_b64=mask_b64,
+                        image_b64=product_b64
+                    ))
+            
+            return BaseApiOut(
+                status=0,
+                msg="",
+                data={"package_images": [img.model_dump() for img in package_images]}
+            )
                 
     except Exception as e:
         return BaseApiOut(

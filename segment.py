@@ -1,3 +1,4 @@
+import logging
 import os
 
 import cv2
@@ -6,6 +7,68 @@ import torch
 from PIL import Image
 from torchvision import transforms
 from transformers import AutoModelForImageSegmentation
+
+from settings import settings
+
+logger = logging.getLogger(__name__)
+
+# 全局模型变量
+_model = None
+_device = None
+_transform = None
+
+
+def initialize_model():
+    """
+    初始化RMBG-2.0模型，在程序启动时调用
+    """
+    global _model, _device, _transform
+    
+    if _model is not None:
+        logger.info("模型已经初始化，跳过重复加载")
+        return
+    
+    try:
+        logger.info("正在初始化 RMBG-2.0 模型...")
+        
+        # 从设置中读取 Hugging Face token
+        access_token = settings.huggingface_hub_token
+        
+        # 加载模型
+        if access_token:
+            logger.info("已检测到 Hugging Face token，正在进行身份验证...")
+            _model = AutoModelForImageSegmentation.from_pretrained(
+                settings.MODEL_NAME, trust_remote_code=True, token=access_token
+            )
+        else:
+            logger.info("未检测到 HUGGINGFACE_HUB_TOKEN，尝试无认证访问...")
+            _model = AutoModelForImageSegmentation.from_pretrained(
+                settings.MODEL_NAME, trust_remote_code=True
+            )
+        
+        # 设置计算精度和设备
+        _device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"使用设备: {_device}")
+        
+        if _device == "cuda":
+            torch.set_float32_matmul_precision("high")
+        
+        _model.to(_device)
+        _model.eval()
+        
+        # 预定义图像预处理变换
+        image_size = (settings.image_size, settings.image_size)
+        _transform = transforms.Compose([
+            transforms.Resize(image_size),
+            transforms.ToTensor(),
+            transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+        ])
+        
+        logger.info("RMBG-2.0 模型初始化完成！")
+        
+    except Exception as e:
+        logger.error(f"模型初始化失败: {str(e)}")
+        raise
 
 
 def remove_background(image_path):
@@ -18,56 +81,27 @@ def remove_background(image_path):
     Returns:
         tuple: (去除背景后的图片, mask图片)
     """
+    global _model, _device, _transform
+    
+    # 确保模型已初始化
+    if _model is None:
+        raise RuntimeError("模型未初始化，请先调用 initialize_model()")
+    
     try:
-        print("正在使用 RMBG-2.0 模型去除背景...")
-
-        # 从环境变量读取 Hugging Face token
-        access_token = os.getenv("HUGGINGFACE_HUB_TOKEN")
+        logger.info("正在使用 RMBG-2.0 模型去除背景...")
 
         # 读取原始图片
         image = Image.open(image_path).convert("RGB")
         original_size = image.size
-        print(f"原图尺寸: {original_size}")
-
-        # 加载模型
-        print("正在加载 RMBG-2.0 模型...")
-        if access_token:
-            print("已检测到 Hugging Face token，正在进行身份验证...")
-            model = AutoModelForImageSegmentation.from_pretrained(
-                "briaai/RMBG-2.0", trust_remote_code=True, token=access_token
-            )
-        else:
-            print("未检测到 HUGGINGFACE_HUB_TOKEN 环境变量，尝试无认证访问...")
-            model = AutoModelForImageSegmentation.from_pretrained(
-                "briaai/RMBG-2.0", trust_remote_code=True
-            )
-
-        # 设置计算精度和设备
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"使用设备: {device}")
-
-        if device == "cuda":
-            torch.set_float32_matmul_precision("high")
-
-        model.to(device)
-        model.eval()
+        logger.info(f"原图尺寸: {original_size}")
 
         # 图像预处理
-        image_size = (1024, 1024)
-        transform_image = transforms.Compose(
-            [
-                transforms.Resize(image_size),
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-            ]
-        )
+        input_images = _transform(image).unsqueeze(0).to(_device)
 
-        input_images = transform_image(image).unsqueeze(0).to(device)
-
-        print("正在进行背景去除推理...")
+        logger.info("正在进行背景去除推理...")
         # 执行推理
         with torch.no_grad():
-            preds = model(input_images)[-1].sigmoid().cpu()
+            preds = _model(input_images)[-1].sigmoid().cpu()
 
         # 处理预测结果
         pred = preds[0].squeeze()
@@ -78,13 +112,13 @@ def remove_background(image_path):
         no_bg_image = image.copy()
         no_bg_image.putalpha(mask)
 
-        print(f"背景去除完成！图片尺寸: {no_bg_image.size}")
-        print(f"Mask图片生成完成！")
+        logger.info(f"背景去除完成！图片尺寸: {no_bg_image.size}")
+        logger.info("Mask图片生成完成！")
 
         return no_bg_image, mask
 
     except Exception as e:
-        print(f"背景去除失败: {str(e)}")
+        logger.error(f"背景去除失败: {str(e)}")
         raise
 
 
@@ -100,7 +134,7 @@ def split_foregrounds(no_bg_image, output_dir, min_area=500):
     Returns:
         int: 分割出的产品数量
     """
-    print("开始分割产品包装...")
+    logger.info("开始分割产品包装...")
 
     # 确保输出目录存在
     os.makedirs(output_dir, exist_ok=True)
@@ -122,7 +156,7 @@ def split_foregrounds(no_bg_image, output_dir, min_area=500):
     # 查找轮廓
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    print(f"检测到 {len(contours)} 个轮廓")
+    logger.info(f"检测到 {len(contours)} 个轮廓")
 
     count = 0
     saved_objects = []
@@ -134,7 +168,7 @@ def split_foregrounds(no_bg_image, output_dir, min_area=500):
 
         # 过滤太小的区域
         if area < min_area:
-            print(f"跳过轮廓 {i}: 面积太小 ({area} < {min_area})")
+            logger.debug(f"跳过轮廓 {i}: 面积太小 ({area} < {min_area})")
             continue
 
         # 创建更精确的掩码
@@ -168,16 +202,16 @@ def split_foregrounds(no_bg_image, output_dir, min_area=500):
             'size': crop_img.size
         })
 
-        print(f"保存产品 {count}: {filename}, 面积: {area:.0f}, 尺寸: {crop_img.size}")
+        logger.info(f"保存产品 {count}: {filename}, 面积: {area:.0f}, 尺寸: {crop_img.size}")
         count += 1
 
-    print(f"\n分割完成！共保存 {count} 个产品包装到目录: {output_dir}")
+    logger.info(f"分割完成！共保存 {count} 个产品包装到目录: {output_dir}")
 
     # 打印详细统计信息
     if saved_objects:
-        print("\n产品统计信息:")
+        logger.info("产品统计信息:")
         for i, obj in enumerate(saved_objects):
-            print(f"  产品 {i}: {obj['filename']} - 面积: {obj['area']:.0f}, 尺寸: {obj['size']}")
+            logger.info(f"  产品 {i}: {obj['filename']} - 面积: {obj['area']:.0f}, 尺寸: {obj['size']}")
 
     return count
 
